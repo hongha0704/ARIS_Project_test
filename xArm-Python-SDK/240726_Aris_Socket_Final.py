@@ -1733,7 +1733,7 @@ class RobotMain(object):
 
                 count = 0
                 while True:
-                    # if sealing_check request arrives or 5sec past
+                    # if sealing_check request arrives or 3sec past
                     if self.NOT_SEAL or count >= 3:      # 3초 간 씰 인식
                         print('seal check complete')
                         break

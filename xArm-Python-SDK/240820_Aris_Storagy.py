@@ -1,3 +1,26 @@
+# S/N : XYZARIS0V3P2311N03
+# Robot IP : 192.168.1.167
+# code_version : 3.1.5.2
+
+
+#!/usr/bin/env python3
+# Software License Agreement (BSD License)
+#
+# Copyright (c) 2022, UFACTORY, Inc.
+# All rights reserved.
+#
+# Author: Vinman <vinman.wen@ufactory.cc> <vinman.cub@gmail.com>
+
+"""
+# Notice
+#   1. Changes to this file on Studio will not be preserved
+#   2. The next conversion will overwrite the file with the same name
+#
+# xArm-Python-SDK: https://github.com/xArm-Developer/xArm-Python-SDK
+#   1. git clone git@github.com:xArm-Developer/xArm-Python-SDK.git
+#   2. cd xArm-Python-SDK
+#   3. python setup.py install
+"""
 import sys
 import math
 import time
@@ -14,187 +37,378 @@ import socket
 import json
 import os
 
-import threading
-
 from ultralytics import YOLO
 import cv2
 import numpy as np
+import time
 from scipy.spatial.distance import cdist
-
 import logging
 
 
+# 상수 Define
+ESC_KEY = ord('q')          # 캠 종료 버튼
+WEBCAM_INDEX = 2            # 사용하고자 하는 웹캠 장치의 인덱스
+FRAME_WIDTH = 640           # 웹캠 프레임 너비
+FRAME_HEIGHT = 480          # 웹캠 프레임 높이
+CONFIDENCE_THRESHOLD = 0.7  # YOLO 모델의 신뢰도 임계값
+DEFAULT_MODEL_PATH = '/home/beakhongha/YOLO_ARIS/train23/weights/best.pt'   # YOLO 모델의 경로
+
+CAPSULE_CHECK_ROI = [(455, 65, 95, 95), (360, 65, 95, 95), (265, 65, 95, 95)]  # A_ZONE, B_ZONE, C_ZONE 순서
+SEAL_CHECK_ROI = (450, 230, 110, 110)   # Seal check ROI 구역
+CUP_TRASH_ROI = (100, 20, 520, 210)     # storagy 위의 컵 쓰레기 인식 ROI 구역
+
+ROBOT_STOP_DISTANCE = 50    # 로봇이 일시정지하는 사람과 로봇 사이의 거리
+
+logging.getLogger("ultralytics").setLevel(logging.WARNING)  # 로깅 수준을 WARNING으로 설정하여 정보 메시지 비활성화
+
+
+
 class YOLOMain:
-    def __init__(self, robot_main):
-        # 모델 로드
-        self.model = YOLO('/home/beakhongha/YOLO_ARIS/train18/weights/best.pt')
+    def __init__(self, robot_main, model_path=DEFAULT_MODEL_PATH, webcam_index=WEBCAM_INDEX, 
+                 frame_width=FRAME_WIDTH, frame_height=FRAME_HEIGHT, conf=CONFIDENCE_THRESHOLD):
+        """
+        YOLOMain 클래스 초기화 메서드.
+        모델을 로드하고 웹캠을 초기화하며, 카메라와 로봇 좌표계 간의 호모그래피 변환 행렬을 계산합니다.
+        """
+        self.model = YOLO(model_path)
+        self.webcam = cv2.VideoCapture(webcam_index)
+        self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
+        self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
+        self.conf = conf
 
-        # 캘리브레이션 데이터 로드
-        calibration_data = np.load('/home/beakhongha/RobotArm/camera_calibration/calibration_data.npz')
-        self.mtx = calibration_data['mtx']
-        self.dist = calibration_data['dist']
-        self.max_roi_index=-1
-        self.frame = None
-        # 카메라 열기
-        self.webcam = cv2.VideoCapture(2)  # 웹캠 장치 열기
-        self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # 프레임 너비 설정
-        self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)  # 프레임 높이 설정
         self.robot = robot_main
-        self.rois1 = [(455, 65, 95, 31), (360, 65, 95, 31), (265, 65, 95, 31)]  # A_ZONE, B_ZONE, C_ZONE 순서
-        if not self.webcam.isOpened():  # 웹캠이 열리지 않은 경우
-            print("웹캠을 열 수 없습니다. 프로그램을 종료합니다.")  # 오류 메시지 출력
-            exit()  # 프로그램 종료
 
-        self.camera_points =  np.array([
-            [482, 211],  # 기준점 1의 카메라 좌표
-            [487, 268],  # 기준점 2의 카메라 좌표
-            [501, 327],  # 기준점 3의 카메라 좌표
-            [425, 211],  # 기준점 4의 카메라 좌표
-            [428, 268],  # 기준점 5의 카메라 좌표
-            [429, 325],  # 기준점 6의 카메라 좌표
-            [363, 212],  # 기준점 7의 카메라 좌표
-            [366, 267],  # 기준점 8의 카메라 좌표
-            [364, 325],  # 기준점 9의 카메라 좌표
-            [113, 206],  # 기준점 10의 카메라 좌표
-            [179, 208],  # 기준점 11의 카메라 좌표
-            [242, 205],  # 기준점 12의 카메라 좌표
-            [236, 328],  # 기준점 13의 카메라 좌표
-            [232, 265],  # 기준점 14의 카메라 좌표
-            ], dtype=np.float32)
+        if not self.webcam.isOpened():
+            raise Exception("웹캠을 열 수 없습니다. 프로그램을 종료합니다.")
         
-        self.robot_points = np.array([
-            [-300, -100],   # 기준점 1의 로봇 좌표
-            [-300, 0],      # 기준점 2의 로봇 좌표
-            [-300, 100],    # 기준점 3의 로봇 좌표
-            [-200, -100],   # 기준점 4의 로봇 좌표
-            [-200, 0],      # 기준점 5의 로봇 좌표
-            [-200, 100],    # 기준점 6의 로봇 좌표
-            [-100, -100],   # 기준점 7의 로봇 좌표
-            [-100, 0],      # 기준점 8의 로봇 좌표
-            [-100, 100],    # 기준점 9의 로봇 좌표
-            [300, -100],    # 기준점 10의 로봇 좌표
-            [200,-100],     # 기준점 11의 로봇 좌표
-            [100, -100],    # 기준점 12의 로봇 좌표
-            [100,100],      # 기준점 13의 로봇 좌표
-            [100,0],        # 기준점 14의 로봇 좌표
-            ], dtype=np.float32)
-        
-        self.H = self.compute_homography_matrix()
+        # 변수 초기화
+        self.center_x_mm = None
+        self.center_y_mm = None
+        self.last_cup_center = None
 
-    # 변환 행렬
+        # 컵 쓰레기 탐지 변수 초기화
+        self.cup_trash_x = None
+        self.cup_trash_y = None
+        self.cup_trash_x_pixel = None
+        self.cup_trash_y_pixel = None
+
+        self.init_roi_state()  # ROI 상태 초기화
+        self.colors = self.init_colors()  # 객체 인식 바운딩 박스 및 마스크 색상 설정
+        self.H = self.compute_homography_matrix()  # 호모그래피 변환 행렬 계산
+    
+
+    def init_roi_state(self):
+        """
+        ROI 상태를 초기화하는 메서드.
+        """
+        self.robot.A_ZONE, self.robot.B_ZONE, self.robot.C_ZONE, self.robot.NOT_SEAL = False, False, False, False
+        self.robot.A_ZONE_start_time, self.robot.B_ZONE_start_time, self.robot.C_ZONE_start_time = None, None, None
+        self.robot.cup_trash_detected = False
+        self.robot.trash_detect_start_time = None
+
+
+    def init_colors(self):
+        """
+        객체 인식 색상을 초기화하는 메서드.
+        객체의 라벨에 따른 색상을 사전으로 반환합니다.
+        """
+        return {
+            'cup': (0, 255, 0),
+            'capsule': (0, 0, 255),
+            'capsule_label': (255, 255, 0),
+            'capsule_not_label': (0, 255, 255),
+            'robot': (0, 165, 255),
+            'human': (255, 0, 0),
+            'cup_holder': (255, 255, 255)
+        }
+
+
     def compute_homography_matrix(self):
-        H, _ = cv2.findHomography(self.camera_points, self.robot_points)
+        """
+        호모그래피 변환 행렬을 계산하는 메서드.
+        카메라 좌표와 로봇 좌표를 기반으로 호모그래피 행렬을 계산합니다.
+        """
+        camera_points = np.array([
+            [247.0, 121.0], [306.0, 107.0], [358.0, 94.0], [238.0, 79.0], [290.0, 66.0], [342.0, 52.0]
+        ], dtype=np.float32)
+        
+        robot_points = np.array([
+            [116.3, -424.9], [17.4, -456.5], [-73.2, -484.2], [140.1, -518.5], [45.6, -548.1], [-47.5, -580.8]
+        ], dtype=np.float32)
+
+        H, _ = cv2.findHomography(camera_points, robot_points)
         print("호모그래피 변환 행렬 H:\n", H)
         return H
     
+
     def transform_to_robot_coordinates(self, image_points):
-        camera_coords = np.array([image_points], dtype=np.float32)
-        camera_coords = np.array([camera_coords])
+        """
+        이미지 좌표를 로봇 좌표계로 변환하는 메서드.
+        주어진 이미지 좌표를 로봇 좌표계로 변환합니다.
+
+        :param image_points: 이미지 좌표 [x, y]
+        :return: 로봇 좌표계로 변환된 좌표 [x, y]
+        """
+        camera_coords = np.array([[image_points]], dtype=np.float32)
         robot_coords = cv2.perspectiveTransform(camera_coords, self.H)
-        # 좌표를 소수점 한 자리로 반올림
-        robot_coords = [round(float(coord), 1) for coord in robot_coords[0][0]]
-        return robot_coords
+        return [round(float(coord), 1) for coord in robot_coords[0][0]]
+    
+
+    def update_coordinates(self, center_x_mm, center_y_mm):
+        '''
+        로봇에게 컵 쓰레기 좌표값을 전달하기 위한 메서드
+        '''
+        self.robot.set_center_coordinates(center_x_mm, center_y_mm)
 
 
-    # def update_coordinates(self, center_x_mm, center_y_mm):
-    #     # 로봇 인스턴스의 좌표를 설정
-    #     self.robot.set_center_coordinates(center_x_mm, center_y_mm)
+    def predict_on_image(self, img):
+        """
+        입력된 이미지에 대해 예측을 수행하는 메서드.
+        YOLO 모델을 사용해 바운딩 박스, 마스크, 클래스, 신뢰도 점수를 반환합니다.
 
-    def predict_on_image(self, img, conf):
-        result = self.model(img, conf=conf)[0]
+        :param img: 예측할 이미지
+        :return: 바운딩 박스, 마스크, 클래스, 신뢰도 점수
+        """
+        result = self.model(img, conf=self.conf)[0]
 
-        # Detection
-        cls = result.boxes.cls.cpu().numpy() if result.boxes else []  # 클래스, (N, 1)
-        probs = result.boxes.conf.cpu().numpy() if result.boxes else []  # 신뢰도 점수, (N, 1)
-        boxes = result.boxes.xyxy.cpu().numpy() if result.boxes else []   # 박스 좌표, xyxy 형식, (N, 4)
-
-        # Segmentation
-        masks = result.masks.data.cpu().numpy() if result.masks is not None else []  # 마스크, (N, H, W)
+        cls = result.boxes.cls.cpu().numpy() if result.boxes else []
+        probs = result.boxes.conf.cpu().numpy() if result.boxes else []
+        boxes = result.boxes.xyxy.cpu().numpy() if result.boxes else []
+        masks = result.masks.data.cpu().numpy() if result.masks is not None else []
         
-        return boxes, masks, cls, probs  # 예측 결과 반환
+        return boxes, masks, cls, probs
+
 
     def overlay(self, image, mask, color, alpha=0.5):
-        """이미지와 세그멘테이션 마스크를 결합하여 하나의 이미지를 만듭니다."""
-        mask = cv2.resize(mask, (image.shape[1], image.shape[0]))  # 마스크를 이미지 크기로 리사이즈
-        colored_mask = np.zeros_like(image, dtype=np.uint8)  # 이미지와 같은 크기의 색 마스크 생성
-        for c in range(3):  # BGR 각 채널에 대해
-            colored_mask[:, :, c] = mask * color[c]  # 마스크를 색상으로 칠함
+        """
+        이미지 위에 세그멘테이션 마스크를 오버레이하는 메서드.
+        주어진 색상과 투명도를 사용하여 마스크를 원본 이미지에 결합합니다.
+
+        :param image: 원본 이미지
+        :param mask: 세그멘테이션 마스크
+        :param color: 마스크를 표시할 색상
+        :param alpha: 마스크와 원본 이미지의 혼합 비율
+        :return: 마스크가 오버레이된 이미지
+        """
+        mask = cv2.resize(mask, (image.shape[1], image.shape[0]))
+        colored_mask = np.zeros_like(image, dtype=np.uint8)
+        for c in range(3):
+            colored_mask[:, :, c] = mask * color[c]
         
-        mask_indices = mask > 0  # 마스크가 적용된 부분의 인덱스
-        if mask_indices.any():  # mask_indices가 유효한지 확인
-            overlay_image = image.copy()  # 원본 이미지를 복사하여 오버레이 이미지 생성
-            overlay_image[mask_indices] = cv2.addWeighted(image[mask_indices], 1 - alpha, colored_mask[mask_indices], alpha, 0)  # 마스크 부분만 밝기 조절
-            return overlay_image  # 오버레이된 이미지 반환
-        else:
-            return image  # 유효하지 않으면 원본 이미지 반환
+        try:
+            mask_indices = mask > 0
+            overlay_image = image.copy()
+            overlay_image[mask_indices] = cv2.addWeighted(image[mask_indices], 1 - alpha, colored_mask[mask_indices], alpha, 0)
+        except Exception as e:
+            print(f"오버레이 처리 중 오류 발생: {e}")
+            return image  # 오류 발생 시 원본 이미지를 반환
+        
+        return overlay_image
+    
 
     def find_contours(self, mask):
-        """마스크에서 외곽선을 찾습니다."""
+        """
+        마스크에서 외곽선을 찾는 메서드.
+        """
         contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         return contours
+    
+
+    def pause_robot(self, image_with_masks, robot_contours, human_contours):
+        """
+        로봇과 인간 간의 최단 거리를 계산하고 로봇을 일시정지하게 하는 메서드.
+        """
+        # 사람과 로봇 사이의 최단 거리 계산 및 시각화
+        if robot_contours and human_contours:
+            robot_points = np.vstack(robot_contours).squeeze()
+            human_points = np.vstack(human_contours).squeeze()
+            dists = cdist(robot_points, human_points)
+            min_dist_idx = np.unravel_index(np.argmin(dists), dists.shape)
+            robot_point = robot_points[min_dist_idx[0]]
+            human_point = human_points[min_dist_idx[1]]
+            self.min_distance = dists[min_dist_idx]
+            min_distance_bool = True
+
+            # 사람과 로봇 사이의 최단 거리 표시
+            cv2.line(image_with_masks, tuple(robot_point), tuple(human_point), (255, 255, 255), 2)
+            mid_point = ((robot_point[0] + human_point[0]) // 2, (robot_point[1] + human_point[1]) // 2)
+            cv2.putText(image_with_masks, f'{self.min_distance:.2f}', mid_point, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        else:
+            self.min_distance = 300
+            min_distance_bool = False
+
+        # 거리 조건 체크 및 로봇 일시정지 제어
+        if self.min_distance <= ROBOT_STOP_DISTANCE and min_distance_bool and self.robot.pressing == False:
+            self.robot.robot_state = 'robot stop'
+            # self.robot._arm.set_state(3)
+        elif self.min_distance > ROBOT_STOP_DISTANCE or not min_distance_bool:
+            self.robot.robot_state = 'robot move'
+            # self.robot._arm.set_state(0)
+
+
+    def capsule_detect_check(self, x1, y1, x2, y2, roi, zone_name, zone_flag, start_time):
+        """
+        ROI 영역에서 객체가 일정 시간 이상 감지되었는지 확인하는 메서드.
+        """
+        rx, ry, rw, rh = roi
+        intersection_x1 = max(x1, rx)
+        intersection_y1 = max(y1, ry)
+        intersection_x2 = min(x2, rx + rw)
+        intersection_y2 = min(y2, ry + rh)
+        intersection_area = max(0, intersection_x2 - intersection_x1) * max(0, intersection_y2 - intersection_y1)
+        box_area = (x2 - x1) * (y2 - y1)
+        is_condition_met = intersection_area >= 0.8 * box_area
+
+        if is_condition_met:
+            current_time = time.time()
+            if not zone_flag:
+                if start_time is None:
+                    start_time = current_time
+                    print(f'{zone_name} start time set')
+                elif current_time - start_time >= 2:
+                    zone_flag = True
+                else:
+                    print(f'Waiting for 2 seconds: {current_time - start_time:.2f} seconds elapsed')
+            else:
+                start_time = current_time
+        else:
+            start_time = None
+
+        return zone_flag, start_time
+    
+
+    def seal_remove_check(self, x1, y1, x2, y2, roi, zone_flag):
+        """
+        ROI 영역에서 객체가 감지되었는지 확인하는 메서드.
+        """
+        rx, ry, rw, rh = roi
+        intersection_x1 = max(x1, rx)
+        intersection_y1 = max(y1, ry)
+        intersection_x2 = min(x2, rx + rw)
+        intersection_y2 = min(y2, ry + rh)
+        intersection_area = max(0, intersection_x2 - intersection_x1) * max(0, intersection_y2 - intersection_y1)
+        box_area = (x2 - x1) * (y2 - y1)
+        
+        if intersection_area >= 0.8 * box_area:
+            zone_flag = True
+
+        return zone_flag
+    
+
+    def make_cup_trash_list(self, x1, y1, x2, y2, image_with_masks):
+        '''
+        ROI 영역에서 컵이 감지되었는지 확인하고 리스트에 컵 쓰레기 좌표를 저장하는 메서드.
+        '''
+        # center 좌표(pixel)
+        center_x_pixel = (x2 - x1) / 2 + x1
+        center_y_pixel = (y2 - y1) / 2 + y1
+
+        # # ROI 영역 내에 있는지 확인
+        if CUP_TRASH_ROI[0] <= center_x_pixel <= CUP_TRASH_ROI[2] and CUP_TRASH_ROI[1] <= center_y_pixel <= CUP_TRASH_ROI[3]:
+            # 이미지 좌표로 실세계 좌표 계산
+            image_points = [center_x_pixel, center_y_pixel]
+            world_points = self.transform_to_robot_coordinates(image_points)
+            self.center_x_mm, self.center_y_mm = world_points
+            
+            self.cup_trash_list_pixel.append((center_x_pixel, center_y_pixel))
+            self.cup_trash_list.append((self.center_x_mm, self.center_y_mm))
+            
+            # 중심좌표 화면에 출력
+            cv2.putText(image_with_masks, f'Center: ({int(self.center_x_mm)}, {int(self.center_y_mm)})', (int(center_x_pixel), int(center_y_pixel - 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            cv2.circle(image_with_masks, (int(center_x_pixel), int(center_y_pixel)), 5, (255, 0, 0), -1)
+
+
+    def cup_trash_detect_order(self, image_with_masks, zone_flag, start_time):
+        '''
+        ARIS에서 가장 가까이 있는 컵의 좌표값을 받아오고, 일정 시간 이상 좌표값의 변동이 없는지 확인하는 메서드.
+        '''
+        # 가장 큰 중심값의 y 좌표를 가진 cup 객체를 찾음
+        for x, y in self.cup_trash_list_pixel:
+            if y > self.max_y_pixel:
+                self.max_y_pixel = y
+                self.cup_trash_x_pixel = x
+                self.cup_trash_y_pixel = y
+
+        for x, y in self.cup_trash_list:
+            if y > self.max_y:
+                self.max_y = y
+                self.cup_trash_x = x
+                self.cup_trash_y = y
+
+        self.update_coordinates(self.cup_trash_x, self.cup_trash_y)
+
+        # 중심좌표 중에 ARIS와 가장 가까운 값 다른 색으로 화면에 출력
+        cv2.putText(image_with_masks, f'Center: ({int(self.cup_trash_x)}, {int(self.cup_trash_y)})', (int(self.cup_trash_x_pixel), int(self.cup_trash_y_pixel - 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        cv2.circle(image_with_masks, (int(self.cup_trash_x_pixel), int(self.cup_trash_y_pixel)), 5, (0, 0, 255), -1)
+
+        # 2초 이상 중심좌표의 변동 없이 감지되는지 확인
+        if self.last_cup_center:
+            if self.distance_between_points((self.cup_trash_x, self.cup_trash_y), self.last_cup_center) < 10:
+                current_time = time.time()  # 현재 시간 기록
+                if start_time is None:
+                    start_time = current_time
+                    print('trash detect start time set')
+                elif current_time - start_time >= 1:  # 1초 이상 ROI 내에 존재하고 중심 좌표 변경 없을 시 쓰레기 탐지
+                    zone_flag = True
+                else:
+                    print(f"Cup detected for {current_time - start_time:.2f} seconds")
+            else:
+                start_time = None
+                zone_flag = False
+        self.last_cup_center = (self.cup_trash_x, self.cup_trash_y) # 중심좌표 갱신
+
+        return zone_flag, start_time
+
 
     # 객체의 현재 위치와 과거 위치의 차이를 비교하기 위한 함수
     def distance_between_points(self, p1, p2):
         return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-    
-   
-        
-    def segmentation(self):
 
-        global A_ZONE, B_ZONE, C_ZONE, NOT_SEAL                         # ROI 내에서 capsule/capsule_not_label 객체가 인식되었는지 여부
-        global A_ZONE_start_time, B_ZONE_start_time, C_ZONE_start_time  # ROI 내에서 capsule 객체가 몇 초 동안 인식되었는지 여부 확인
 
-        A_ZONE, B_ZONE, C_ZONE, NOT_SEAL = False, False, False, False
-        A_ZONE_start_time, B_ZONE_start_time, C_ZONE_start_time = None, None, None
-
-        global center_x_mm, center_y_mm
-        global trash_detect_start_time
-        global cup_trash_detected
-
-        center_x_mm, center_y_mm = None, None
-        last_cup_center = None
-        cup_trash_detected = False
-
-        # YOLO 모델의 로깅 레벨 설정
-        logging.getLogger('ultralytics').setLevel(logging.ERROR)
-
-        # 라벨별 색상 정의 (BGR 형식)
-        colors = {
-            'cup': (0, 255, 0),  # 컵: 녹색
-            'capsule': (0, 0, 255),  # 캡슐: 빨간색
-            'capsule_label': (255, 255, 0),  # 캡슐 라벨: 노란색
-            'capsule_not_label': (0, 255, 255),  # 캡슐 비라벨: 청록색
-            'robot': (0, 165, 255),  # 로봇: 오렌지색
-            'human': (255, 0, 0),  # 인간: 파란색
-            'hand': (0, 255, 255)  # 손: 노란색
-        }
-
-        # 영구적으로 설정된 ROI 구역
-        rois = [(455, 65, 95, 95), (360, 65, 95, 95), (265, 65, 95, 95)]  # A_ZONE, B_ZONE, C_ZONE 순서
-        specific_roi = (450, 230, 110, 110)  # Seal check ROI 구역
-
+    def run_yolo(self):
+        """
+        YOLO 모델을 실행하는 메서드.
+        실시간으로 웹캠 영상을 처리하고, 예측 결과를 화면에 출력합니다.
+        """
+        # 카메라 작동
         while True:
             ret, frame = self.webcam.read()  # 웹캠에서 프레임 읽기
             if not ret:  # 프레임을 읽지 못한 경우
                 print("카메라에서 프레임을 읽을 수 없습니다. 프로그램을 종료합니다.")  # 오류 메시지 출력
-                break  # 루프 종료
+                break
 
             # 현재 프레임 예측
-            boxes, masks, cls, probs = self.predict_on_image(frame, conf=0.7)
+            boxes, masks, cls, probs = self.predict_on_image(frame)
 
             # 원본 이미지에 마스크 오버레이 및 디텍션 박스 표시
             image_with_masks = np.copy(frame)  # 원본 이미지 복사
 
+            # 사람과 로봇의 segmentation 마스크 외곽선을 저장하는 리스트
             robot_contours = []
             human_contours = []
 
+            # ROI 영역 내의 cup 좌표 저장하는 리스트
+            self.cup_trash_list = []
+            self.cup_trash_list_pixel = []
+            self.max_y = -float('inf')  # 컵의 y좌표 비교용 변수
+            self.max_y_pixel = -float('inf')  # 컵의 y좌표 비교용 변수
+
+            # 설정된 ROI를 흰색 바운딩 박스로 그리고 선을 얇게 설정
+            for (x, y, w, h) in CAPSULE_CHECK_ROI:
+                cv2.rectangle(image_with_masks, (x, y), (x + w, y + h), (255, 255, 255), 1)  # 각 ROI를 흰색 사각형으로 그림
+            # 특정 ROI를 흰색 바운딩 박스로 그리고 선을 얇게 설정
+            cv2.rectangle(image_with_masks, (SEAL_CHECK_ROI[0], SEAL_CHECK_ROI[1]), 
+                          (SEAL_CHECK_ROI[0] + SEAL_CHECK_ROI[2], SEAL_CHECK_ROI[1] + SEAL_CHECK_ROI[3]), 
+                          (255, 255, 255), 1)  # 특정 ROI를 흰색 사각형으로 그림
+            
+            # 각 객체에 대해 박스, 마스크 생성
             for box, mask, class_id, prob in zip(boxes, masks, cls, probs):  # 각 객체에 대해
                 label = self.model.names[int(class_id)]  # 클래스 라벨 가져오기
 
                 if label == 'hand':  # 'hand' 객체를 'human' 객체로 변경
                     label = 'human'
 
-                color = colors.get(label, (255, 255, 255))  # 클래스에 해당하는 색상 가져오기
+                color = self.colors.get(label, (255, 255, 255))  # 클래스에 해당하는 색상 가져오기
                 
                 if mask is not None and len(mask) > 0:
                     # 마스크 오버레이
@@ -209,190 +423,40 @@ class YOLOMain:
 
                 # 디텍션 박스 및 라벨 표시
                 x1, y1, x2, y2 = map(int, box)  # 박스 좌표 정수형으로 변환
-                cv2.rectangle(image_with_masks, (x1, y1), (x2, y2), color, 2)  # 경계 상자 그리기
+                cv2.rectangle(image_with_masks, (x1, y1), (x2, y2), color, 2)  # 경계 상자 그리기                        
+                cv2.putText(image_with_masks, f'{label} {prob:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # 라벨 및 신뢰도 점수 표시
 
-                # trash mode에 사용
-                if label == 'capsule':  # 'capsule' 객체에 대해서만 중심 좌표 계산 및 출력
-                    # center 좌표(pixel)
-                    center_x_pixel = (x2 - x1) / 2 + x1
-                    center_y_pixel = (y2 - y1) / 2 + y1
+                # A_ZONE, B_ZONE, C_ZONE ROI 내 일정 시간 이상 capsule 객체 인식 확인
+                if label == 'capsule':
+                    self.robot.A_ZONE, self.robot.A_ZONE_start_time = self.capsule_detect_check(x1, y1, x2, y2, CAPSULE_CHECK_ROI[0], 'A_ZONE', self.robot.A_ZONE, self.robot.A_ZONE_start_time)
+                    self.robot.B_ZONE, self.robot.B_ZONE_start_time = self.capsule_detect_check(x1, y1, x2, y2, CAPSULE_CHECK_ROI[1], 'B_ZONE', self.robot.B_ZONE, self.robot.B_ZONE_start_time)
+                    self.robot.C_ZONE, self.robot.C_ZONE_start_time = self.capsule_detect_check(x1, y1, x2, y2, CAPSULE_CHECK_ROI[2], 'C_ZONE', self.robot.C_ZONE, self.robot.C_ZONE_start_time)
 
-                    # 이미지 좌표로 실세계 좌표 계산
-                    image_points = [center_x_pixel, center_y_pixel]
-                    world_points = self.transform_to_robot_coordinates(image_points)
-
-                    center_x_mm = world_points[0]
-                    center_y_mm = world_points[1]
-
-                    cv2.putText(image_with_masks, f'Center: ({int(center_x_mm)}, {int(center_y_mm)})', (x1, y1 - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # 캡슐 중심 좌표 표시
-                    # self.update_coordinates(center_x_mm, center_y_mm)
-
-                    # 컵 쓰레기 ROI 영역 내에 있는지 확인
-                    roi_x1, roi_y1 = -400.0, -170.0
-                    roi_x2, roi_y2 = 400.0, 145.0
-
-                    current_time = time.time()  # 현재 시간 기록
-                                        
-                    if last_cup_center is not None:
-                        if (center_x_mm is not None and center_y_mm is not None and                               # 중심좌표가 존재하면
-                            roi_x1 <= center_x_mm <= roi_x2 and roi_y1 <= center_y_mm <= roi_y2 and               # ROI 영역 내에 중심좌표 위치하면
-                            self.distance_between_points((center_x_mm, center_y_mm), last_cup_center) < 10): # 객체의 중심점이 이동하지 않으면
-
-                            if trash_detect_start_time is None:
-                                trash_detect_start_time = current_time
-                                print('trash detect start time set')
-                            elif current_time - trash_detect_start_time >= 2:  # 2초 이상 ROI 내에 존재하고 중심 좌표 변경 없을 시 쓰레기 탐지
-                                cup_trash_detected = True
-                            else:
-                                # 탐지 시작하고 0초부터 2초까지 단위로 출력
-                                print(f"Capsule detected for {current_time - trash_detect_start_time:.2f} seconds")
-                        else:
-                            trash_detect_start_time = None
-                    else:
-                        trash_detect_start_time = None
-
-                    last_cup_center = (center_x_mm, center_y_mm) # 중심좌표가 갱신
-
-                    cv2.putText(image_with_masks, f'Center: ({int(center_x_mm)}, {int(center_y_mm)})', (x1, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-                cv2.putText(image_with_masks, f'{label}: {prob:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # 라벨 및 신뢰도 표시
-
-
-                # ROI 내 capsule 객체 인식 확인
-                if label == 'capsule':  # capsule 객체만 확인
-                    for i, (rx, ry, rw, rh) in enumerate(rois[:3]):  # 최대 세 개의 ROI만 확인
-                        # ROI와 바운딩 박스의 교차 영역 계산
-                        intersection_x1 = max(x1, rx)  # 교차 영역의 왼쪽 위 x 좌표
-                        intersection_y1 = max(y1, ry)  # 교차 영역의 왼쪽 위 y 좌표
-                        intersection_x2 = min(x2, rx + rw)  # 교차 영역의 오른쪽 아래 x 좌표
-                        intersection_y2 = min(y2, ry + rh)  # 교차 영역의 오른쪽 아래 y 좌표
-
-                        # 교차 영역의 면적 계산
-                        intersection_area = max(0, intersection_x2 - intersection_x1) * max(0, intersection_y2 - intersection_y1)
-                        # print(f'Intersection area: {intersection_area}')
-
-                        # 바운딩 박스의 면적 계산
-                        box_area = (x2 - x1) * (y2 - y1)
-                        # print(f'Box area: {box_area}')
-
-                        # 교차 영역이 바운딩 박스 면적의 80% 이상인지 여부 출력
-                        is_condition_met = intersection_area >= 0.8 * box_area
-                        # print(f'Condition met (intersection_area >= 0.8 * box_area): {is_condition_met}')
-
-                        # 교차 영역이 바운딩 박스 면적의 80% 이상일 때만 True로 설정
-                        if is_condition_met:
-                            current_time = time.time()  # 현재 시간 기록
-
-                            if i == 0:  # 첫 번째 ROI는 A_ZONE
-                                if not A_ZONE:
-                                    if A_ZONE_start_time is None:
-                                        A_ZONE_start_time = current_time
-                                        print('A_ZONE start time set')
-                                    elif current_time - A_ZONE_start_time >= 2: # 2초 이상 캡슐 인식 시 A_ZONE = True
-                                        A_ZONE = True
-                                    else:
-                                        print(f'Waiting for 2 seconds: {current_time - A_ZONE_start_time:.2f} seconds elapsed')
-                                else:
-                                    A_ZONE_start_time = current_time  # 상태가 이미 True인 경우, 시작 시간을 현재 시간으로 갱신
-
-                            elif i == 1:  # 두 번째 ROI는 B_ZONE
-                                if not B_ZONE:
-                                    if B_ZONE_start_time is None:
-                                        B_ZONE_start_time = current_time
-                                    elif current_time - B_ZONE_start_time >= 2: # 2초 이상 캡슐 인식 시 B_ZONE = True
-                                        B_ZONE = True
-                                    else:
-                                        print(f'Waiting for 2 seconds: {current_time - B_ZONE_start_time:.2f} seconds elapsed')
-                                else:
-                                    B_ZONE_start_time = current_time  # 상태가 이미 True인 경우, 시작 시간을 현재 시간으로 갱신
-
-                            elif i == 2:  # 세 번째 ROI는 C_ZONE
-                                if not C_ZONE:
-                                    if C_ZONE_start_time is None:
-                                        C_ZONE_start_time = current_time
-                                    elif current_time - C_ZONE_start_time >= 2: # 2초 이상 캡슐 인식 시 C_ZONE = True
-                                        C_ZONE = True
-                                    else:
-                                        print(f'Waiting for 2 seconds: {current_time - C_ZONE_start_time:.2f} seconds elapsed')
-                                else:
-                                    C_ZONE_start_time = current_time  # 상태가 이미 True인 경우, 시작 시간을 현재 시간으로 갱신
-
-                        else:
-                            if i == 0:
-                                A_ZONE_start_time = None
-                            elif i == 1:
-                                B_ZONE_start_time = None
-                            elif i == 2:
-                                C_ZONE_start_time = None
-
-                # 필요에 따라 A_ZONE, B_ZONE, C_ZONE 상태 업데이트
-                # print(f"A_ZONE: {A_ZONE}, B_ZONE: {B_ZONE}, C_ZONE: {C_ZONE}")
-
-                # 특정 ROI 내 capsule_not_label 객체 인식 확인
+                # 씰 확인 ROI 내 capsule_not_label 객체 인식 확인
                 if label == 'capsule_not_label':
-                    rx, ry, rw, rh = specific_roi
-                    # 특정 ROI와 바운딩 박스의 교차 영역 계산
-                    intersection_x1 = max(x1, rx)
-                    intersection_y1 = max(y1, ry)
-                    intersection_x2 = min(x2, rx + rw)
-                    intersection_y2 = min(y2, ry + rh)
+                    self.robot.NOT_SEAL = self.seal_remove_check(x1, y1, x2, y2, SEAL_CHECK_ROI, self.robot.NOT_SEAL)
 
-                    # 교차 영역의 면적 계산
-                    intersection_area = max(0, intersection_x2 - intersection_x1) * max(0, intersection_y2 - intersection_y1)
+                # Storagy 위의 컵 쓰레기 인식, 쓰레기 좌표를 저장하는 리스트 생성
+                if label == 'cup':
+                    self.make_cup_trash_list(x1, y1, x2, y2, image_with_masks)
 
-                    # 바운딩 박스의 면적 계산
-                    box_area = (x2 - x1) * (y2 - y1)
+            # Storagy 위에 컵 쓰레기가 있을 때 쓰레기 좌표를 저장하고 우선순위 지정
+            if self.cup_trash_list:
+                self.robot.cup_trash_detected, self.robot.trash_detect_start_time = self.cup_trash_detect_order(image_with_masks, self.robot.cup_trash_detected, self.robot.trash_detect_start_time)
 
-                    # 교차 영역이 바운딩 박스 면적의 80% 이상일 때만 True로 설정
-                    if intersection_area >= 0.8 * box_area:
-                        NOT_SEAL = True
+            # 로봇 일시정지 기능
+            self.pause_robot(image_with_masks, robot_contours, human_contours)
 
-            # 최단 거리 계산 및 시각화
-            if robot_contours and human_contours:
-                robot_points = np.vstack(robot_contours).squeeze()
-                human_points = np.vstack(human_contours).squeeze()
-                dists = cdist(robot_points, human_points)
-                min_dist_idx = np.unravel_index(np.argmin(dists), dists.shape)
-                robot_point = robot_points[min_dist_idx[0]]
-                human_point = human_points[min_dist_idx[1]]
-                min_distance = dists[min_dist_idx]
-                min_distance_bool = True
+            # 화면 왼쪽 위에 최단 거리 및 로봇 상태 및 ROI 상태 표시
+            cv2.putText(image_with_masks, f'Distance: {self.min_distance:.2f}, state: {self.robot.robot_state}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.putText(image_with_masks, f'A_ZONE: {self.robot.A_ZONE}, B_ZONE: {self.robot.B_ZONE}, C_ZONE: {self.robot.C_ZONE}, NOT_SEAL: {self.robot.NOT_SEAL}', (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.putText(image_with_masks, f'cup_trash_detected: {self.robot.cup_trash_detected}', (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                # 최단 거리 표시
-                cv2.line(image_with_masks, tuple(robot_point), tuple(human_point), (255, 255, 255), 2)
-                mid_point = ((robot_point[0] + human_point[0]) // 2, (robot_point[1] + human_point[1]) // 2)
-                cv2.putText(image_with_masks, f'{min_distance:.2f}', mid_point, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            else:
-                min_distance = 300
-                min_distance_bool = False
-
-            # 거리 조건 체크 및 로봇 일시정지 제어
-            if min_distance <= 50 and min_distance_bool and self.robot.pressing == False:
-                robot_state = 'robot stop'
-                self.robot._arm.set_state(3)
-            elif min_distance > 50 or not min_distance_bool:
-                robot_state = 'robot move'
-                self.robot._arm.set_state(0)
-
-            # 설정된 ROI를 흰색 바운딩 박스로 그리고 선을 얇게 설정
-            for (x, y, w, h) in rois:
-                cv2.rectangle(image_with_masks, (x, y), (x + w, y + h), (255, 255, 255), 1)  # 각 ROI를 흰색 사각형으로 그림
-            # 특정 ROI를 흰색 바운딩 박스로 그리고 선을 얇게 설정
-            cv2.rectangle(image_with_masks, (specific_roi[0], specific_roi[1]), 
-                          (specific_roi[0] + specific_roi[2], specific_roi[1] + specific_roi[3]), 
-                          (255, 255, 255), 1)  # 특정 ROI를 흰색 사각형으로 그림
-
-            # 화면 왼쪽 위에 최단 거리 및 로봇 상태 표시
-            cv2.putText(image_with_masks, f'Distance: {min_distance:.2f}, state: {robot_state}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-            # 화면 왼쪽 위에 ROI 상태 표시
-            cv2.putText(image_with_masks, f'A_ZONE: {A_ZONE}, B_ZONE: {B_ZONE}, C_ZONE: {C_ZONE}, NOT_SEAL: {NOT_SEAL}', (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-            # 마스크가 적용된 프레임 표시
+            # 디텍션 박스와 마스크가 적용된 프레임 표시
             cv2.imshow("Webcam with Segmentation Masks and Detection Boxes", image_with_masks)
 
-            # 'q' 키를 누르면 종료
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # 종료 키를 누르면 종료
+            if cv2.waitKey(1) & 0xFF == ESC_KEY:
                 break
 
         # 자원 해제
@@ -400,14 +464,14 @@ class YOLOMain:
         cv2.destroyAllWindows()  # 모든 OpenCV 창 닫기
 
 
+
 class RobotMain(object):
     """Robot Main Class"""
 
-    def __init__(self, robot,yolo_main, **kwargs):
+    def __init__(self, robot, **kwargs):
         self.alive = True
         self._arm = robot
         self._tcp_speed = 100
-        self.yolo_main = yolo_main
         self._tcp_acc = 2000
         self._angle_speed = 20
         self._angle_acc = 500
@@ -416,7 +480,8 @@ class RobotMain(object):
         self._robot_init()
         self.state = 'stopped'
         self.pressing = False
-
+        self.center_x_mm = None
+        self.center_y_mm = None
 
         self.position_home = [179.2, -42.1, 7.4, 186.7, 41.5, -1.6] #angle
         self.position_jig_A_grab = [-257.3, -138.3, 198, 68.3, 86.1, -47.0] #linear
@@ -436,6 +501,11 @@ class RobotMain(object):
         self.position_jig_B_serve = [-166.8, -126.5, 200.9, -45.2, 89.2, -133.6] #Linear
         self.position_jig_C_serve = [-63.1, -138.2, 199.5, -45.5, 88.1, -112.1] #Linear
         self.position_capsule_grab = [234.2, 129.8, 464.5, -153.7, 87.3, -68.7] #Linear
+
+    def set_center_coordinates(self, x_mm, y_mm):
+        # 좌표 값을 업데이트
+        self.cup_trash_x = x_mm
+        self.cup_trash_y = y_mm
 
         # Robot init
     def _robot_init(self):
@@ -1469,7 +1539,7 @@ class RobotMain(object):
             return
         time.sleep(0.5)
 
-        if A_ZONE:
+        if self.A_ZONE:
             pass
         else:
             code = self._arm.set_servo_angle(angle=[176, 31.7, 31, 76.7, 91.2, -1.9], speed=self._angle_speed,
@@ -1481,7 +1551,7 @@ class RobotMain(object):
             return
         time.sleep(1)
 
-        if A_ZONE:
+        if self.A_ZONE:
             code = self._arm.set_servo_angle(angle=[179.5, 33.5, 32.7, 113.0, 93.1, -2.3], speed=self._angle_speed,
                                              mvacc=self._angle_acc, wait=False, radius=20.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -1490,12 +1560,12 @@ class RobotMain(object):
                                           mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_servo_angle'): return
 
-        elif B_ZONE:
+        elif self.B_ZONE:
             code = self._arm.set_position(*self.position_jig_B_grab, speed=self._tcp_speed,
                                           mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
 
-        elif C_ZONE:
+        elif self.C_ZONE:
             code = self._arm.set_servo_angle(angle=[182.6, 27.8, 27.7, 55.7, 90.4, -6.4], speed=self._angle_speed,
                                              mvacc=self._angle_acc, wait=False, radius=20.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -1509,7 +1579,7 @@ class RobotMain(object):
             return
         time.sleep(1)
 
-        if C_ZONE:
+        if self.C_ZONE:
             code = self._arm.set_position(z=150, radius=0, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
                                           wait=False)
             if not self._check_code(code, 'set_position'): return
@@ -1552,7 +1622,7 @@ class RobotMain(object):
 
         print('motion_place_fail_capsule start')
 
-        if A_ZONE:
+        if self.A_ZONE:
             code = self._arm.set_servo_angle(angle=[177.3, 5.5, 12.9, 133.6, 81.3, 183.5], speed=self._angle_speed,
                                              mvacc=self._angle_acc, wait=False, radius=20.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -1561,7 +1631,7 @@ class RobotMain(object):
                                           mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
 
-        elif B_ZONE:
+        elif self.B_ZONE:
             code = self._arm.set_servo_angle(angle=[159.5, 11.8, 22.2, 75.6, 92.8, 186.6], speed=self._angle_speed,
                                              mvacc=self._angle_acc, wait=False, radius=20.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -1570,7 +1640,7 @@ class RobotMain(object):
                                           mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
             
-        elif C_ZONE:
+        elif self.C_ZONE:
             code = self._arm.set_servo_angle(angle=[176.9, -2.2, 15.3, 69.3, 87.5, 195.5], speed=self._angle_speed,
                                              mvacc=self._angle_acc, wait=False, radius=20.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -1691,18 +1761,17 @@ class RobotMain(object):
 
     def motion_topping_test(self):
 
-        global toppingAmount
-        toppingAmount = 5
+        self.toppingAmount = 5
 
         print('motion_topping start')
         print('send')
 
-        if Toping:
+        if self.Toping:
             code = self._arm.set_servo_angle(angle=[36.6, -36.7, 21.1, 85.6, 59.4, 44.5], speed=self._angle_speed,
                                                 mvacc=self._angle_acc, wait=True, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
             
-            if C_ZONE:
+            if self.C_ZONE:
                 code = self._arm.set_position(*self.position_topping_C, speed=self._tcp_speed,
                                                 mvacc=self._tcp_acc, radius=0.0, wait=True)
                 if not self._check_code(code, 'set_position'): return
@@ -1715,7 +1784,7 @@ class RobotMain(object):
                                                 wait=True)
                 if not self._check_code(code, 'set_position'): return
                 
-                code = self._arm.set_pause_time(toppingAmount - 3)
+                code = self._arm.set_pause_time(self.toppingAmount - 3)
                 if not self._check_code(code, 'set_pause_time'):
                     return
                 
@@ -1736,7 +1805,7 @@ class RobotMain(object):
                                                 relative=True, wait=False)
                 if not self._check_code(code, 'set_position'): return
 
-            elif B_ZONE:
+            elif self.B_ZONE:
                 code = self._arm.set_servo_angle(angle=[55.8, -48.2, 14.8, 86.1, 60.2, 58.7], speed=self._angle_speed,
                                                     mvacc=self._angle_acc, wait=False, radius=20.0)
                 if not self._check_code(code, 'set_servo_angle'): return
@@ -1753,7 +1822,7 @@ class RobotMain(object):
                                                 wait=True)
                 if not self._check_code(code, 'set_position'): return
 
-                code = self._arm.set_pause_time(toppingAmount - 4)
+                code = self._arm.set_pause_time(self.toppingAmount - 4)
                 if not self._check_code(code, 'set_pause_time'):
                     return
                 
@@ -1782,7 +1851,7 @@ class RobotMain(object):
                                                 mvacc=self._tcp_acc, radius=10.0, wait=False)
                 if not self._check_code(code, 'set_position'): return
 
-            elif A_ZONE:
+            elif self.A_ZONE:
                 code = self._arm.set_position(*self.position_topping_A, speed=self._tcp_speed,
                                                 mvacc=self._tcp_acc, radius=0.0, wait=True)
                 if not self._check_code(code, 'set_position'): return
@@ -1791,7 +1860,7 @@ class RobotMain(object):
                 if not self._check_code(code, 'set_cgpio_digital'):
                     return
                 
-                code = self._arm.set_pause_time(toppingAmount - 1)
+                code = self._arm.set_pause_time(self.toppingAmount - 1)
                 if not self._check_code(code, 'set_servo_angle'): return
 
                 
@@ -1841,7 +1910,7 @@ class RobotMain(object):
 
         print('motion_make_icecream start')
 
-        if Toping:
+        if self.Toping:
             time.sleep(4)
         else:
             time.sleep(7)
@@ -1887,7 +1956,7 @@ class RobotMain(object):
         self._tcp_speed = 100
         self._tcp_acc = 1000
 
-        if A_ZONE:
+        if self.A_ZONE:
             code = self._arm.set_position(*self.position_jig_A_serve, speed=self._tcp_speed,
                                           mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
@@ -1917,7 +1986,7 @@ class RobotMain(object):
             if not self._check_code(code, 'set_position'): return
             
 
-        elif B_ZONE:
+        elif self.B_ZONE:
 
             code = self._arm.set_position(*self.position_jig_B_serve, speed=self._tcp_speed,
                                           mvacc=self._tcp_acc, radius=0.0, wait=False)
@@ -1947,7 +2016,7 @@ class RobotMain(object):
                                           mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
             
-        elif C_ZONE:
+        elif self.C_ZONE:
             code = self._arm.set_servo_angle(angle=[177.6, 0.2, 13.5, 70.0, 94.9, 13.8], speed=self._angle_speed,
                                              mvacc=self._angle_acc, wait=True, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -2099,189 +2168,55 @@ class RobotMain(object):
             self._arm.set_state(0)
 
 
-    # ==================== pause test motion ====================
-    def run_robot_pause_test(self):
-        self._angle_speed = 10
-        self._angle_acc = 10
-
-        code = self._arm.set_servo_angle(angle=self.position_home, speed=self._angle_speed,
-                                         mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return
-
-        code = self._arm.set_servo_angle(angle=[191.9, -0.3, 26.4, 181.2, 66.8, -6.6], speed=self._angle_speed,
-                                         mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return
-
-        code = self._arm.set_servo_angle(angle=[337.3, 4, 36.3, 179.3, 55.5, -1.4], speed=self._angle_speed,
-                                         mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return
-
-        code = self._arm.set_servo_angle(angle=[191.9, -0.3, 26.4, 181.2, 66.8, -6.6], speed=self._angle_speed,
-                                         mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return
-
-        code = self._arm.set_servo_angle(angle=self.position_home, speed=self._angle_speed,
-                                         mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return
-
-
-    def run_robot_test(self):
-
-        global A_ZONE, B_ZONE, C_ZONE, NOT_SEAL
-
-        # --------------모드 설정 변수(나중에 방식 변경)--------------
-        global Toping, MODE
-        Toping = True
-        MODE = 'icecreaming'
-
-        # --------------카메라 없이 테스트할 때 변수--------------
-        A_ZONE = True
-        B_ZONE = False
-        C_ZONE = False
-        NOT_SEAL = True
-
-        self._angle_speed = 100
-        self._angle_acc = 100
-
-        self._tcp_speed = 100
-        self._tcp_acc = 1000
-
-        print('motion_grab_cup start')
-        
-        code = self._arm.set_servo_angle(angle=[2.9, -31.0, 33.2, 125.4, -30.4, -47.2], speed=self._angle_speed,
-                                         mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return
-        
-        code = self._arm.set_cgpio_analog(0, 5)
-        if not self._check_code(code, 'set_cgpio_analog'):
-            return
-        code = self._arm.set_cgpio_analog(1, 5)
-        if not self._check_code(code, 'set_cgpio_analog'):
-            return
-
-        print('motion_grab_cup finish')
-        time.sleep(0.5)
-
-        global toppingAmount
-        toppingAmount = 5
-
-        print('motion_topping start')
-        print('send')
-
-        if Toping:
-            code = self._arm.set_position(*self.position_icecream_with_topping, speed=self._tcp_speed,
-                                            mvacc=self._tcp_acc, radius=0.0, wait=True)
-            if not self._check_code(code, 'set_position'): return
-            
-        else:
-            code = self._arm.set_servo_angle(angle=self.position_icecream_no_topping, speed=self._angle_speed,
-                                                mvacc=self._angle_acc, wait=True, radius=0.0)
-            if not self._check_code(code, 'set_servo_angle'): return
-
-        print('motion_topping finish')
-        time.sleep(0.5)
-
-        print('motion_make_icecream start')
-
-        if Toping:
-            time.sleep(5)
-        else:
-            time.sleep(8)
-
-        time.sleep(4)
-        code = self._arm.set_position(z=-20, radius=0, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
-                                      wait=True)
-        if not self._check_code(code, 'set_position'): return
-
-        time.sleep(4)
-        code = self._arm.set_position(z=-10, radius=0, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
-                                      wait=True)
-        if not self._check_code(code, 'set_position'): return
-        
-        if not self._check_code(code, 'set_pause_time'):
-            return
-
-        code = self._arm.set_position(z=-50, radius=0, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
-                                      wait=True)
-        if not self._check_code(code, 'set_position'): return
-        
-        time.sleep(1)
-
-        # code = self._arm.set_cgpio_digital(3, 0, delay_sec=0)
-        # if not self._check_code(code, 'set_cgpio_digital'):
-        #     return
-
-        print('motion_make_icecream finish')
-        time.sleep(0.5)
-
-
-
     # ============================= trash mode =============================
     def trash_check_mode(self):
-        
-        global cup_trash_detected
+
         print('trash_check_mode start')
-        
-        self.motion_home_test()
 
-        time.sleep(3)
-
-        self._angle_speed = 50
-        self._angle_acc = 50
-
-        self._tcp_speed = 50
-        self._tcp_acc = 50
-        
-        # ---------- 왼쪽 구역 쓰레기 탐지 ----------
+        # ---------- 왼쪽 탐지 ----------
         code = self._arm.set_servo_angle(angle=[180, -95, 25, 186.7, 100, -1.6], speed=self._angle_speed,
                                             mvacc=self._angle_acc, wait=False, radius=0.0)
         if not self._check_code(code, 'set_servo_angle'): return
-        time.sleep(5)
-        if cup_trash_detected == True:
-            cup_trash_detected = False
-            self.trash_mode()
-        else:
-            print(cup_trash_detected)
-            pass
-            
-        self._angle_speed = 50
-        self._angle_acc = 50
-
-        self._tcp_speed = 50
-        self._tcp_acc = 50
         
-        # ---------- 오른쪽 구역 쓰레기 탐지 ----------
+        time.sleep(3)
+
+        # if self.cup_trash_detected == True:
+        #     self.trash_mode()
+        # else:
+        #     pass
+
+        # ---------- 오른쪽 탐지 ----------
         code = self._arm.set_servo_angle(angle=[180, 10, 25, 186.7, 75, -1.6], speed=self._angle_speed,
                                             mvacc=self._angle_acc, wait=False, radius=0.0)
         if not self._check_code(code, 'set_servo_angle'): return
-        time.sleep(5)
-        
-        if cup_trash_detected == True:
-            cup_trash_detected = False
-            self.trash_mode()
-        else:
-            print(cup_trash_detected)
-            pass
 
-        self.motion_home_test()
+        time.sleep(3)
+
+        # if self.cup_trash_detected == True:
+        #     self.trash_mode()
+        # else:
+        #     pass
+
+        self.cup_trash_detected = False
 
         print('trash_check_mode finish')
-    
+
+
     def trash_mode(self):
 
-        global center_x_mm, center_y_mm
+        print('trash_mode start')
 
         # 테스트용 변수선언
-        # center_x_mm = 350
-        # center_y_mm = 100
+        center_x_mm = self.center_x_mm
+        center_y_mm = self.center_y_mm
         
-        trash_mode_initial = [180, -27.2, 1.8, 180, 48.1, 180] #angle    
+        trash_mode_initial = [180, -27.2, 1.8, 180, 48.1, 180] #angle
         
         self._angle_speed = 100
         self._angle_acc = 100
 
         self._tcp_speed = 100
-        self._tcp_acc = 1000
+        self._tcp_acc = 500
 
         code = self._arm.open_lite6_gripper()
         if not self._check_code(code, 'close_lite6_gripper'):
@@ -2293,18 +2228,15 @@ class RobotMain(object):
         
         code = self._arm.set_servo_angle(angle=self.position_home, speed=self._angle_speed,
                                                 mvacc=self._angle_acc, wait=True, radius=0.0)
-        if not self._check_code(code, 'set_servo_angle'): return     
-
-        print(center_x_mm, center_y_mm)   
+        if not self._check_code(code, 'set_servo_angle'): return        
 
         # -------------------- 쓰레기 탐지되면 동작_왼쪽 바깥쪽 --------------------
-        if center_x_mm <= -300 and center_y_mm >= -130 and center_y_mm <= 100:
-            print("왼쪽 바깥쪽")
+        if self.center_x_mm <= -300 and self.center_y_mm >= -130 and self.center_y_mm <= 100:
             code = self._arm.set_servo_angle(angle=trash_mode_initial, speed=self._angle_speed,
                                                 mvacc=self._angle_acc, wait=True, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
 
-            code = self._arm.set_position(y=center_y_mm, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
+            code = self._arm.set_position(y=self.center_y_mm, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
                                         wait=True)
             if not self._check_code(code, 'set_position'): return
 
@@ -2312,7 +2244,7 @@ class RobotMain(object):
                                         wait=True)
             if not self._check_code(code, 'set_position'): return
 
-            code = self._arm.set_position(*[center_x_mm+90, center_y_mm, 150.6, 180, -77.1, -180], speed=self._tcp_speed,
+            code = self._arm.set_position(*[self.center_x_mm+90, self.center_y_mm, 150.6, 180, -77.1, -180], speed=self._tcp_speed,
                                             mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
 
@@ -2359,8 +2291,7 @@ class RobotMain(object):
             pass
 
         # -------------------- 쓰레기 탐지되면 동작_왼쪽 안쪽 --------------------
-        if center_x_mm >= -300 and center_x_mm <= -100 and center_y_mm >= -130 and center_y_mm <= 110:
-            print("왼쪽 안쪽")
+        if self.center_x_mm >= -300 and self.center_x_mm <= -100 and self.center_y_mm >= -130 and self.center_y_mm <= 110:
             code = self._arm.set_servo_angle(angle=trash_mode_initial, speed=self._angle_speed,
                                                 mvacc=self._angle_acc, wait=True, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -2373,7 +2304,7 @@ class RobotMain(object):
                                             mvacc=self._angle_acc, wait=False, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
 
-            code = self._arm.set_position(y=center_y_mm, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
+            code = self._arm.set_position(y=self.center_y_mm, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
                                         wait=True)
             if not self._check_code(code, 'set_position'): return
 
@@ -2438,8 +2369,7 @@ class RobotMain(object):
             pass
 
         # -------------------- 쓰레기 탐지되면 동작_오른쪽 --------------------
-        if center_x_mm > 100 and center_x_mm < 380 and center_y_mm >= -130 and center_y_mm <= 100:
-            print("오른쪽")
+        if self.center_x_mm > 100 and self.center_x_mm < 380 and self.center_y_mm >= -130 and self.center_y_mm <= 100:
             code = self._arm.set_servo_angle(angle=[90, -42.1, 7.4, 186.7, 41.5, -1.6], speed=self._angle_speed,
                                                     mvacc=self._angle_acc, wait=False, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
@@ -2456,7 +2386,7 @@ class RobotMain(object):
                                                     mvacc=self._angle_acc, wait=True, radius=0.0)
             if not self._check_code(code, 'set_servo_angle'): return
 
-            code = self._arm.set_position(*[center_x_mm, -173, 307.5, -173, 13.3, -87.6], speed=self._tcp_speed,
+            code = self._arm.set_position(*[self.center_x_mm, -173, 307.5, -173, 13.3, -87.6], speed=self._tcp_speed,
                                         mvacc=self._tcp_acc, radius=0.0, wait=True)
             if not self._check_code(code, 'set_position'): return
 
@@ -2484,8 +2414,8 @@ class RobotMain(object):
                                             wait=True)
             if not self._check_code(code, 'set_position'): return
 
-            if center_y_mm >= 0:
-                code = self._arm.set_position(y=center_y_mm, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
+            if self.center_y_mm >= 0:
+                code = self._arm.set_position(y=self.center_y_mm, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
                                             wait=True)
                 if not self._check_code(code, 'set_position'): return
 
@@ -2522,129 +2452,139 @@ class RobotMain(object):
                 return
         else:
             pass
-    def save_frame(self, image_path):
-        """프레임을 저장하고 이미지 경로를 반환"""
-        if self.frame is not None:
-            cv2.imwrite(image_path, self.frame)
-            print(f"Frame saved to {image_path}.")
-        else:
-            print("No frame to save.")
-        # (카메라 좌표계와 로봇 좌표계에서 각각 측정된 좌표)
-        
-    def compute_difference(self, image1, image2):
-        """두 이미지의 차분을 계산합니다."""
-        # 차이 이미지 계산
-        difference = cv2.absdiff(image1, image2)
-        
-        # None 체크 추가
-        if difference is None:
-            raise ValueError("Error in computing difference; one of the input images might be None.")
-        
-        # 차이 이미지를 그레이스케일로 변환
-        gray_diff = cv2.cvtColor(difference, cv2.COLOR_BGR2GRAY) if len(difference.shape) == 3 and difference.shape[2] == 3 else difference
-        
-        # 이진화
-        _, binary_diff = cv2.threshold(gray_diff, 50, 255, cv2.THRESH_BINARY)
-        
-        return gray_diff, binary_diff
-    
-    def mog2(self, image_path1, image_path2):
-        """두 이미지를 비교하여 차분을 계산하고 표시합니다."""
-        # 이미지 로드
-        image1 = cv2.imread(image_path1)
-        image2 = cv2.imread(image_path2)
-        
-        if image1 is None or image2 is None:
-            print("Error: Unable to open one of the images.")
+
+        print('trash_mode finish')
+
+
+    def run_trash_mode(self):
+
+        print('run_trash_mode start')
+
+        self._angle_speed = 100
+        self._angle_acc = 100
+
+        self._tcp_speed = 100
+        self._tcp_acc = 500
+
+        code = self._arm.open_lite6_gripper()
+        if not self._check_code(code, 'close_lite6_gripper'):
+            return
+        time.sleep(1)
+        code = self._arm.stop_lite6_gripper()
+        if not self._check_code(code, 'close_lite6_gripper'):
             return
         
-        # 두 이미지의 크기가 동일해야 합니다.
-        if image1.shape != image2.shape:
-            print("Error: Images must have the same size.")
-            return
+        code = self._arm.set_servo_angle(angle=self.position_home, speed=self._angle_speed,
+                                                mvacc=self._angle_acc, wait=True, radius=0.0)
+        if not self._check_code(code, 'set_servo_angle'): return  
         
-        for i, (x, y, w, h) in enumerate(self.rois1):
-            # ROI 추출
-            roi_image = image1[y:y+h, x:x+w]
-            roi_image1 = image2[y:y+h, x:x+w]
-            
-            # 차분 계산
-            gray_diff, binary_diff = self.compute_difference(roi_image, roi_image1)
-            
-            # 윤곽선 찾기
-            contours, _ = cv2.findContours(binary_diff, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # 윤곽선의 면적 계산 및 최대 면적 출력
-            if contours:
-                areas = [cv2.contourArea(contour) for contour in contours]
-                current_max_area = max(areas)
-                print(f"Max contour area in ROI {i}: {current_max_area}")
-                if current_max_area > max_area:
-                    max_area = current_max_area
-                    max_roi_index = i
-            else:
-                print(f"No contours found in ROI {i}.")
-        
-        if max_roi_index != -1:
-            print(f"ROI with the maximum contour area is ROI {max_roi_index} with area {max_area}")
-            return self.max_roi_index
-        else:
-            print("No contours found in any ROI.")
-            return None
+        # 컵 쓰레기를 다 버릴 때 까지 무한루프
+        while True:
+            # 일정시간 동안 컵 탐지
+            count = 0
+            while True:
+                if self.cup_trash_detected or count >= 5:  
+                    print('cup detect finish')
+                    break
+                time.sleep(0.2)
+                print("컵 쓰레기 탐지중...")
+                count += 0.2
+
+            # 컵 감지 시 쓰레기 버리는 모션 시작
+            if self.cup_trash_detected:
+                code = self._arm.set_servo_angle(angle=[270, -15.9, 12.1, 180, 49.9, 0], speed=self._angle_speed,
+                                                            mvacc=self._angle_acc, wait=True, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return 
+
+                # 컵 좌표값 저장
+                cup_x_mm = self.cup_trash_x
+                cup_y_mm = self.cup_trash_y
+
+                code = self._arm.set_position(*[cup_x_mm, -189, 262.6, 180, 77.9, 90], speed=self._tcp_speed,
+                                                mvacc=self._tcp_acc, radius=0.0, wait=True)
+                if not self._check_code(code, 'set_position'): return
+
+                time.sleep(0.5)
+
+                code = self._arm.set_position(*[cup_x_mm, cup_y_mm+130, 262.6, 180, 77.9, 90], speed=self._tcp_speed,
+                                                mvacc=self._tcp_acc, radius=0.0, wait=True)
+                if not self._check_code(code, 'set_position'): return
+
+                code = self._arm.close_lite6_gripper()
+                if not self._check_code(code, 'close_lite6_gripper'):
+                    return
+                
+                time.sleep(2)
+
+                code = self._arm.set_position(z=100, radius=-1, speed=self._tcp_speed, mvacc=self._tcp_acc, relative=True,
+                                                    wait=True)
+                if not self._check_code(code, 'set_position'): return
+
+                code = self._arm.set_servo_angle(angle=[267.6, -18.8, 37.7, 180, 20.5, 0], speed=self._angle_speed,
+                                                            mvacc=self._angle_acc, wait=True, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return
+
+                code = self._arm.set_servo_angle(angle=self.position_home, speed=self._angle_speed,
+                                                        mvacc=self._angle_acc, wait=False, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return  
+
+                code = self._arm.set_servo_angle(angle=[51, -81.1, 1.6, 180, -1.7, 0], speed=self._angle_speed,
+                                                            mvacc=self._angle_acc, wait=False, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return
+
+                code = self._arm.set_servo_angle(angle=[51, -11.8, 20.1, 177.8, 30.9, 180], speed=self._angle_speed,
+                                                            mvacc=self._angle_acc, wait=True, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return
+
+                code = self._arm.open_lite6_gripper()
+                if not self._check_code(code, 'open_lite6_gripper'):
+                    return
+                
+                time.sleep(2)
+
+                code = self._arm.stop_lite6_gripper()
+                if not self._check_code(code, 'stop_lite6_gripper'):
+                    return
+                
+                code = self._arm.set_servo_angle(angle=[51, -81.1, 1.6, 180, -1.7, 0], speed=self._angle_speed,
+                                                            mvacc=self._angle_acc, wait=False, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return
+
+                code = self._arm.set_servo_angle(angle=self.position_home, speed=self._angle_speed,
+                                                        mvacc=self._angle_acc, wait=True, radius=0.0)
+                if not self._check_code(code, 'set_servo_angle'): return 
+
+            # self.cup_trash_detected가 False가 되면 무한루프 break
+            if not self.cup_trash_detected:
+                break
+
+        print('run_trash_mode finish')
+
+
     # ============================= main =============================
     def run_robot(self):
 
-        global A_ZONE, B_ZONE, C_ZONE, NOT_SEAL                         # ROI 내에서 capsule/capsule_not_label 객체가 인식되었는지 여부
-        global A_ZONE_start_time, B_ZONE_start_time, C_ZONE_start_time  # ROI 내에서 capsule 객체가 몇 초 동안 인식되었는지 여부 확인
-        global cup_trash_detected
-        global trash_detect_start_time
-
         # --------------모드 설정 변수(나중에 방식 변경)--------------
-        global Toping, MODE
-        Toping = True
-        MODE = 'icecreaming'
+        self.Toping = True
+        self.MODE = 'icecreaming'
 
         while self.is_alive:
             # --------------카메라 없이 테스트할 때 변수--------------
-            # A_ZONE = False
-            # B_ZONE = True
-            # C_ZONE = False
-            # NOT_SEAL = True
+            # self.A_ZONE = False
+            # self.B_ZONE = True
+            # self.C_ZONE = False
+            # self.NOT_SEAL = True
 
             # Joint Motion
-            if MODE == 'icecreaming':
+            if self.MODE == 'icecreaming':
                 # --------------icecream start--------------------
                 print('icecream start')
                 time.sleep(4)
                 self.motion_home_test()
 
-                count = 0
-                while not (self.A_ZONE or self.B_ZONE or self.C_ZONE):
+                while not (self.A_ZONE or self.B_ZONE or self.C_ZONE):  # 캡슐 인식 대기
                     time.sleep(0.2)
                     print('캡슐 인식 대기중...')
-                    
-                    if count >= 5:
-                        # 캡처한 프레임을 저장
-                        if self.yolo_main.frame is not None:
-                            image_path2 = '/home/beakhongha/Downloads/chboon/2.jpg'
-                            # 프레임을 파일로 저장
-                            cv2.imwrite(image_path2, self.yolo_main.frame)
-                            # 기존 이미지와 비교하기 위한 이미지 경로
-                            image_path1 = '/home/beakhongha/Downloads/chboon/1.jpg'
-                            
-                            # 이미지 차분 계산
-                            self.mog2(image_path1, image_path2)
-                        
-                        # ZONE 설정
-                        if self.yolo_main.max_roi_index == 0:
-                            self.A_ZONE = True
-                        elif self.yolo_main.max_roi_index == 1:
-                            self.B_ZONE = True
-                        elif self.yolo_main.max_roi_index == 2:
-                            self.C_ZONE = True
-                        break
-                    count += 0.2
-                    print(f"A_ZONE : {self.A_ZONE}, B_ZONE: {self.B_ZONE}, C_ZONE: {self.C_ZONE}")
                 time.sleep(2)
 
                 self.motion_grab_capsule_test()
@@ -2653,13 +2593,13 @@ class RobotMain(object):
                 count = 0
                 while True:
                     # if sealing_check request arrives or 5sec past
-                    if NOT_SEAL or count >= 3:      # 3초 간 씰 인식
+                    if self.NOT_SEAL or count >= 3:      # 3초 간 씰 인식
                         print('seal check complete')
                         break
                     time.sleep(0.2)
                     count += 0.2
 
-                if NOT_SEAL:
+                if self.NOT_SEAL:
                     self.motion_place_capsule_test()
                     self.motion_grab_cup_test()
                     self.motion_topping_test()
@@ -2679,12 +2619,12 @@ class RobotMain(object):
                     return
                 
                 # -------------- 동작 종류 후 변수 초기화 --------------
-                A_ZONE, B_ZONE, C_ZONE, NOT_SEAL = False, False, False, False
-                A_ZONE_start_time, B_ZONE_start_time, C_ZONE_start_time = None, None, None
-                cup_trash_detected = False
-                trash_detect_start_time = None
-                time.sleep(2)
-           
+                self.A_ZONE, self.B_ZONE, self.C_ZONE, self.NOT_SEAL = False, False, False, False
+                self.A_ZONE_start_time, self.B_ZONE_start_time, self.C_ZONE_start_time = None, None, None
+                self.cup_trash_detected = False
+                self.trash_detect_start_time = None
+                time.sleep(1)
+
 
 if __name__ == '__main__':
     RobotMain.pprint('xArm-Python-SDK Version:{}'.format(version.__version__))
@@ -2692,14 +2632,11 @@ if __name__ == '__main__':
     robot_main = RobotMain(arm)
     yolo_main = YOLOMain(robot_main)
 
-    # 스레드 생성
-    robot_thread = threading.Thread(target=robot_main.run_robot)
-    yolo_thread = threading.Thread(target=yolo_main.segmentation)
+    robot_thread = threading.Thread(target=robot_main.run_trash_mode)
+    yolo_thread = threading.Thread(target=yolo_main.run_yolo)
 
-    # 스레드 시작
     robot_thread.start()
     yolo_thread.start()
 
-    # 스레드가 끝날 때까지 대기
     robot_thread.join()
     yolo_thread.join()
