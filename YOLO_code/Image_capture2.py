@@ -3,7 +3,7 @@ import time
 import os
 
 # 사진 저장 디렉토리 설정
-output_dir = "Image_5_CUP"
+output_dir = "Image_5"
 os.makedirs(output_dir, exist_ok=True)
 
 # 웹캠 초기화

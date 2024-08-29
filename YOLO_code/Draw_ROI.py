@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2
 
 # Load a model
-model = YOLO("/home/beakhongha/YOLO_ARIS/train21/weights/best.pt")
+model = YOLO("/home/beakhongha/YOLO_ARIS/train23/weights/best.pt")
 
 # Open the camera
 webcam = cv2.VideoCapture(2)  # 0은 기본 카메라를 의미합니다. 만약 여러 개의 카메라가 연결되어 있다면, 1, 2 등을 시도해보세요.
@@ -73,7 +73,7 @@ while True:
     C = False
 
     # Run inference on the frame
-    results = model(frame, imgsz=640, conf=0.5)  # 이미지 크기와 신뢰도(confidence)를 설정
+    results = model(frame, imgsz=640, conf=0.88)  # 이미지 크기와 신뢰도(confidence)를 설정
 
     # Display the results
     for result in results:

@@ -41,7 +41,7 @@ def find_contours(mask):
     return contours
 
 # 모델 로드
-model = YOLO('/home/beakhongha/YOLO_ARIS/train21/weights/best.pt')
+model = YOLO('/home/beakhongha/YOLO_ARIS/train19/weights/best.pt')
 
 # 카메라 열기
 webcam = cv2.VideoCapture(2)  # 웹캠 장치 열기
@@ -55,12 +55,7 @@ if not webcam.isOpened():  # 웹캠이 열리지 않은 경우
 # 라벨별 색상 정의 (BGR 형식)
 colors = {
     'cup': (0, 255, 0),  # 컵: 녹색
-    'capsule': (0, 0, 255),  # 캡슐: 빨간색
-    'capsule_label': (255, 255, 0),  # 캡슐 라벨: 노란색
-    'capsule_not_label': (0, 255, 255),  # 캡슐 비라벨: 청록색
-    'robot': (0, 165, 255),  # 로봇: 오렌지색
-    'human': (255, 0, 0),  # 인간: 파란색
-    'hand': (0, 255, 255)  # 손: 노란색
+    'capsule': (0, 0, 255)  # 캡슐: 빨간색
 }
 
 while True:
@@ -70,7 +65,7 @@ while True:
         break  # 루프 종료
 
     # 현재 프레임 예측
-    boxes, masks, cls, probs = predict_on_image(model, frame, conf=0.8)
+    boxes, masks, cls, probs = predict_on_image(model, frame, conf=0.2)
 
     # 탐지된 객체 출력
     detected_objects = []
@@ -78,14 +73,11 @@ while True:
     # 원본 이미지에 마스크 오버레이 및 디텍션 박스 표시
     image_with_masks = np.copy(frame)  # 원본 이미지 복사
 
-    robot_contours = []
-    human_contours = []
-
     for box, mask, class_id, prob in zip(boxes, masks, cls, probs):  # 각 객체에 대해
         label = model.names[int(class_id)]  # 클래스 라벨 가져오기
         
-        if label == 'hand':  # 'hand'를 'human'으로 변경
-            label = 'human'
+        if label not in ['cup', 'capsule']:  # 'cup' 및 'capsule'이 아닌 객체 무시
+            continue
 
         detected_objects.append(f'{label}: {prob:.2f}')  # 탐지된 객체 리스트에 추가
 
@@ -97,49 +89,38 @@ while True:
 
             # 라벨별 외곽선 저장
             contours = find_contours(mask)
-            if label == 'robot':
-                robot_contours.extend(contours)
-            elif label == 'human':
-                human_contours.extend(contours)
 
         # 디텍션 박스 및 라벨 표시
         x1, y1, x2, y2 = map(int, box)  # 박스 좌표 정수형으로 변환
         cv2.rectangle(image_with_masks, (x1, y1), (x2, y2), color, 2)  # 경계 상자 그리기
-        center_x = (x2 - x1) /2
-        center_y = (y2 - y1) /2
-        center_point = (center_x,center_y) 
-        cv2.putText(image_with_masks, f'{label}: {prob:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # 라벨 및 신뢰도 표시
+        
+        # center 좌표(pixel)
+        center_x_pixel = (x2 - x1) / 2 + x1
+        center_y_pixel = (y2 - y1) / 2 + y1
 
+        # center 좌표 변환(pixel to mm)
+        center_x = -1 * ((center_x_pixel * (1 + (38/474) * (center_y_pixel/194)) - 19 * (center_y_pixel/194) - 62) * 800 / (474 * (1 + (38/474) * (center_y_pixel/194)))) + 400
+        center_y = ((center_y_pixel - 171) * (315/194)) - 170
+
+        center_x_mm = center_x
+        center_y_mm = center_y * 0.915
+        
+        # 최종 center 좌표(mm)
+        center_point_mm = (float(center_x_mm), float(center_y_mm))
+        
+        print(f"center point : ({center_x_mm:.3f}, {center_y_mm:.3f})")
+        cv2.circle(image_with_masks, (int(center_x_pixel), int(center_y_pixel)), 5, (0, 0, 255), -1)  # 중심점에 빨간색 점 찍기
+        cv2.putText(image_with_masks, f'{label}: {prob:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # 라벨 및 신뢰도 표시
+        cv2.putText(image_with_masks, f'Center: ({int(center_x_mm)}, {int(center_y_mm)})', (x1, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+
+    # 인식 된 객체 터미널에 출력
     if detected_objects:
         print("Detected objects:", ", ".join(detected_objects))
-        if(detected_objects == "cup"):
-            detected_objects.center_point
-
-
-    # 최단 거리 계산 및 시각화
-    if robot_contours and human_contours:
-        robot_points = np.vstack(robot_contours).squeeze()
-        
-        human_points = np.vstack(human_contours).squeeze()
-        dists = cdist(robot_points, human_points)
-        min_dist_idx = np.unravel_index(np.argmin(dists), dists.shape)
-        robot_point = robot_points[min_dist_idx[0]]
-        human_point = human_points[min_dist_idx[1]]
-        min_distance = dists[min_dist_idx]
-
-        # 최단 거리 표시
-        cv2.line(image_with_masks, tuple(robot_point), tuple(human_point), (255, 255, 255), 2)
-        mid_point = ((robot_point[0] + human_point[0]) // 2, (robot_point[1] + human_point[1]) // 2)
-        cv2.putText(image_with_masks, f'{min_distance:.2f}', mid_point, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-        # 거리 조건 체크
-        if min_distance <= 30:
-            print(f'state = stop!, min_distance = {min_distance}')
-        else:
-            print(f'state = move!, min_distance = {min_distance}')
 
     # 마스크가 적용된 프레임 표시
     cv2.imshow("Webcam with Segmentation Masks and Detection Boxes", image_with_masks)
+
 
     # 'q' 키를 누르면 종료
     if cv2.waitKey(1) & 0xFF == ord('q'):

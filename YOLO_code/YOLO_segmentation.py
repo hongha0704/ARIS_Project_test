@@ -30,7 +30,7 @@ def overlay(image, mask, color, alpha=0.5):
     return overlay_image  # 오버레이된 이미지 반환
 
 # 모델 로드
-model = YOLO('/home/beakhongha/YOLO_ARIS/train2/weights/best.pt')
+model = YOLO('/home/beakhongha/YOLO_ARIS/train23/weights/best.pt')
 
 # 카메라 열기
 webcam = cv2.VideoCapture(2)  # 웹캠 장치 열기
